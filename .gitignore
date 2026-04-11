@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.local
+uploads/
+python-separator/uploads/
+python-separator/outputs/
+python-matchering/uploads/
+python-matchering/outputs/
+*.log
+.DS_Store
