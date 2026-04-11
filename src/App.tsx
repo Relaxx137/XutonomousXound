@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Mic, Square, Settings2, Download, Music, Loader2, Volume2, Waves, RotateCcw, Sparkles, Bot, CheckCircle2, Flame, Play, Layers, FastForward, Activity, Sliders, Ear, AlertTriangle, X, SplitSquareHorizontal, FileText, Wand2, Minimize2 } from 'lucide-react';
+import { Upload, Mic, Square, Settings2, Download, Music, Loader2, Volume2, Waves, RotateCcw, Sparkles, Bot, CheckCircle2, Flame, Play, Layers, FastForward, Activity, Sliders, Ear, AlertTriangle, X, SplitSquareHorizontal, FileText, Wand2, Minimize2, History, Key, ChevronRight, ChevronLeft, HelpCircle, Eye, EyeOff } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import { mixAudio, processBeat, MixSettings, defaultMixSettings } from './lib/audioUtils';
 import { runAIAgentNetwork, AILog } from './lib/aiMixer';
@@ -69,12 +69,66 @@ const stepNames = {
   result: 'Master'
 };
 
+// --- Tutorial steps definition ---
+const TUTORIAL_STEPS = [
+  {
+    icon: Upload,
+    color: 'text-violet-400',
+    bg: 'bg-violet-500/10',
+    border: 'border-violet-500/20',
+    title: 'Upload Your Beat',
+    description: 'Start by tapping the glowing orb or dropping any audio file (MP3, WAV, etc.) onto it. This becomes the instrumental backing track for your recording.',
+  },
+  {
+    icon: FastForward,
+    color: 'text-blue-400',
+    bg: 'bg-blue-500/10',
+    border: 'border-blue-500/20',
+    title: 'Prepare the Beat',
+    description: 'Fine-tune the beat\'s speed and pitch before recording. The BPM is detected automatically. You can also extract individual stems (vocals, drums, bass) using the AI separator.',
+  },
+  {
+    icon: Mic,
+    color: 'text-rose-400',
+    bg: 'bg-rose-500/10',
+    border: 'border-rose-500/20',
+    title: 'Record Your Vocals',
+    description: 'Hit the microphone button to record over the beat. Enable the metronome for timing help, or the monitor to hear yourself in real time. Record backup vocals on a second pass.',
+  },
+  {
+    icon: Sliders,
+    color: 'text-amber-400',
+    bg: 'bg-amber-500/10',
+    border: 'border-amber-500/20',
+    title: 'Mix & Master with AI',
+    description: 'Manually tweak EQ, compression, reverb and more — or deploy the AI Agent Network. The AI listens to your tracks and automatically dials in professional mix settings.',
+  },
+  {
+    icon: Download,
+    color: 'text-emerald-400',
+    bg: 'bg-emerald-500/10',
+    border: 'border-emerald-500/20',
+    title: 'Download Your Track',
+    description: 'Your finished mix is exported as a high-quality WAV. Optionally upload a reference track to match its loudness and tone using AI reference mastering before downloading.',
+  },
+];
+
 export default function App() {
   const [hasApiKey, setHasApiKey] = useState(true);
   const [step, setStep] = useState<'upload' | 'prepare' | 'record' | 'mix' | 'result'>('upload');
   const [isMobile, setIsMobile] = useState(false);
   const [isSmallMobile, setIsSmallMobile] = useState(false);
   const [mobileMixPanel, setMobileMixPanel] = useState<'none' | 'console' | 'ai'>('none');
+
+  // Tutorial state
+  const [showTutorial, setShowTutorial] = useState(false);
+  const [tutorialStep, setTutorialStep] = useState(0);
+
+  // Settings modal state
+  const [showSettings, setShowSettings] = useState(false);
+  const [manualApiKey, setManualApiKey] = useState('');
+  const [showKeyValue, setShowKeyValue] = useState(false);
+  const [savedApiKey, setSavedApiKey] = useState('');
 
   useEffect(() => {
     const checkKey = async () => {
@@ -85,6 +139,39 @@ export default function App() {
     };
     checkKey();
   }, []);
+
+  // Load saved API key and show tutorial on first visit
+  useEffect(() => {
+    const stored = localStorage.getItem('gemini_api_key');
+    if (stored) {
+      setSavedApiKey(stored);
+      setManualApiKey(stored);
+    }
+    const seen = localStorage.getItem('tutorial_seen');
+    if (!seen) {
+      setShowTutorial(true);
+    }
+  }, []);
+
+  const handleSaveApiKey = () => {
+    const trimmed = manualApiKey.trim();
+    if (!trimmed) return;
+    localStorage.setItem('gemini_api_key', trimmed);
+    setSavedApiKey(trimmed);
+    setHasApiKey(true);
+    setShowSettings(false);
+  };
+
+  const handleClearApiKey = () => {
+    localStorage.removeItem('gemini_api_key');
+    setSavedApiKey('');
+    setManualApiKey('');
+  };
+
+  const closeTutorial = () => {
+    setShowTutorial(false);
+    localStorage.setItem('tutorial_seen', '1');
+  };
 
   const handleSelectKey = async () => {
     if ((window as any).aistudio && (window as any).aistudio.openSelectKey) {
@@ -108,6 +195,17 @@ export default function App() {
     window.addEventListener('resize', checkMobile);
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
+
+  // Cleanup on unmount: clear polling intervals, animation frame, audio context, mic stream
+  useEffect(() => {
+    return () => {
+      if (separationPollRef.current) clearInterval(separationPollRef.current);
+      if (masteringPollRef.current) clearInterval(masteringPollRef.current);
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      if (audioCtxRef.current) audioCtxRef.current.close();
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+    };
+  }, []);
   
   const [originalBeatBlob, setOriginalBeatBlob] = useState<Blob | null>(null);
   const [beatSpeed, setBeatSpeed] = useState(1.0);
@@ -130,8 +228,12 @@ export default function App() {
   const [history, setHistory] = useState<{id: string, name: string, date: string, url: string}[]>([]);
 
   useEffect(() => {
-    const saved = localStorage.getItem('audio_history');
-    if (saved) setHistory(JSON.parse(saved));
+    try {
+      const saved = localStorage.getItem('audio_history');
+      if (saved) setHistory(JSON.parse(saved));
+    } catch {
+      localStorage.removeItem('audio_history');
+    }
   }, []);
 
   const saveToHistory = (url: string) => {
@@ -255,14 +357,15 @@ export default function App() {
       
       // Analyze BPM
       setIsAnalyzingBpm(true);
+      let bpmContext: AudioContext | null = null;
       try {
         const arrayBuffer = await file.arrayBuffer();
         const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
         if (!AudioContextClass) throw new Error("AudioContext not supported");
-        const audioContext = new AudioContextClass();
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+        bpmContext = new AudioContextClass();
+        const audioBuffer = await bpmContext.decodeAudioData(arrayBuffer);
         setBeatBuffer(audioBuffer);
-        
+
         const bpmCandidates = await analyzeFullBuffer(audioBuffer);
         if (bpmCandidates && bpmCandidates.length > 0) {
           // The first candidate is usually the most confident one
@@ -275,6 +378,7 @@ export default function App() {
         setDetectedBpm(null);
       } finally {
         setIsAnalyzingBpm(false);
+        if (bpmContext) bpmContext.close();
       }
     }
   };
@@ -409,6 +513,7 @@ export default function App() {
 
   const drawVisualizer = () => {
     const canvas = canvasRef.current;
+    if (!canvas || !analyserRef.current) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
@@ -455,8 +560,8 @@ export default function App() {
     if (!beatBlob) return;
     setIsGeneratingLyrics(true);
     try {
-      const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
-      if (!apiKey) throw new Error("API Key is missing.");
+      const apiKey = process.env.GEMINI_API_KEY || localStorage.getItem('gemini_api_key') || '';
+      if (!apiKey) throw new Error("API Key is missing. Add one in Settings.");
       const ai = new GoogleGenAI({ apiKey });
       const prompt = `You are a professional songwriter. Generate lyrics for a song. 
       The user has provided some initial lyrics: "${lyrics}". 
@@ -465,7 +570,7 @@ export default function App() {
       The mood should match a modern hit. Return only the lyrics text.`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-2.0-flash",
         contents: prompt,
       });
 
@@ -804,23 +909,245 @@ export default function App() {
 
   return (
     <>
-      {!hasApiKey && (
+      {!hasApiKey && !savedApiKey && (
         <div className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-xl flex items-center justify-center p-4">
           <div className="bg-zinc-900 border border-white/10 p-8 rounded-3xl max-w-md w-full shadow-2xl flex flex-col items-center text-center">
             <Sparkles className="w-12 h-12 text-amber-400 mb-6" />
             <h2 className="text-2xl font-bold text-white mb-4">API Key Required</h2>
-            <p className="text-zinc-400 mb-8 leading-relaxed">
-              To use the AI-powered mixing and mastering features, you need to provide a Gemini API key.
+            <p className="text-zinc-400 mb-6 leading-relaxed">
+              To use the AI-powered mixing and mastering features, provide a Gemini API key.
             </p>
-            <button
-              onClick={handleSelectKey}
-              className="w-full py-4 bg-white text-black font-bold rounded-xl hover:bg-zinc-200 transition-colors uppercase tracking-widest text-sm"
-            >
-              Select API Key
-            </button>
+            <div className="w-full flex flex-col gap-3">
+              <button
+                onClick={handleSelectKey}
+                className="w-full py-4 bg-white text-black font-bold rounded-xl hover:bg-zinc-200 transition-colors uppercase tracking-widest text-sm"
+              >
+                Select via AI Studio
+              </button>
+              <button
+                onClick={() => { setShowSettings(true); }}
+                className="w-full py-3 bg-white/5 border border-white/10 text-white/70 font-bold rounded-xl hover:bg-white/10 transition-colors uppercase tracking-widest text-sm flex items-center justify-center gap-2"
+              >
+                <Key className="w-4 h-4" /> Enter Key Manually
+              </button>
+            </div>
           </div>
         </div>
       )}
+
+      {/* ── Tutorial Modal ── */}
+      <AnimatePresence>
+        {showTutorial && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-xl flex items-center justify-center p-4"
+            onClick={(e) => { if (e.target === e.currentTarget) closeTutorial(); }}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              transition={{ type: 'spring', damping: 20 }}
+              className="bg-zinc-950 border border-white/10 rounded-3xl max-w-md w-full shadow-2xl overflow-hidden"
+            >
+              {/* Progress bar */}
+              <div className="h-0.5 bg-white/5 w-full">
+                <motion.div
+                  className="h-full bg-white/30"
+                  animate={{ width: `${((tutorialStep + 1) / TUTORIAL_STEPS.length) * 100}%` }}
+                  transition={{ duration: 0.4 }}
+                />
+              </div>
+
+              <div className="p-8 flex flex-col gap-6">
+                {/* Step indicator dots */}
+                <div className="flex gap-1.5 justify-center">
+                  {TUTORIAL_STEPS.map((_, i) => (
+                    <button
+                      key={i}
+                      onClick={() => setTutorialStep(i)}
+                      className={`h-1 rounded-full transition-all duration-300 ${i === tutorialStep ? 'w-6 bg-white' : 'w-1.5 bg-white/20'}`}
+                    />
+                  ))}
+                </div>
+
+                {/* Icon + content */}
+                <AnimatePresence mode="wait">
+                  <motion.div
+                    key={tutorialStep}
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -20 }}
+                    transition={{ duration: 0.25 }}
+                    className="flex flex-col items-center text-center gap-5"
+                  >
+                    {(() => {
+                      const s = TUTORIAL_STEPS[tutorialStep];
+                      const Icon = s.icon;
+                      return (
+                        <>
+                          <div className={`w-16 h-16 rounded-2xl ${s.bg} border ${s.border} flex items-center justify-center`}>
+                            <Icon className={`w-8 h-8 ${s.color}`} />
+                          </div>
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 mb-1">
+                              Step {tutorialStep + 1} of {TUTORIAL_STEPS.length}
+                            </p>
+                            <h3 className="text-xl font-bold text-white mb-3">{s.title}</h3>
+                            <p className="text-sm text-white/60 leading-relaxed">{s.description}</p>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </motion.div>
+                </AnimatePresence>
+
+                {/* Navigation */}
+                <div className="flex gap-3">
+                  {tutorialStep > 0 && (
+                    <button
+                      onClick={() => setTutorialStep(t => t - 1)}
+                      className="flex-1 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-white/60 font-bold text-sm transition-all flex items-center justify-center gap-2"
+                    >
+                      <ChevronLeft className="w-4 h-4" /> Back
+                    </button>
+                  )}
+                  {tutorialStep < TUTORIAL_STEPS.length - 1 ? (
+                    <button
+                      onClick={() => setTutorialStep(t => t + 1)}
+                      className="flex-1 py-3 bg-white text-black rounded-2xl font-bold text-sm hover:bg-white/90 transition-all flex items-center justify-center gap-2"
+                    >
+                      Next <ChevronRight className="w-4 h-4" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={closeTutorial}
+                      className="flex-1 py-3 bg-white text-black rounded-2xl font-bold text-sm hover:bg-white/90 transition-all flex items-center justify-center gap-2"
+                    >
+                      <CheckCircle2 className="w-4 h-4" /> Let's Go
+                    </button>
+                  )}
+                </div>
+
+                {/* Skip link */}
+                {tutorialStep < TUTORIAL_STEPS.length - 1 && (
+                  <button onClick={closeTutorial} className="text-[10px] text-white/20 hover:text-white/50 transition-colors uppercase tracking-widest text-center">
+                    Skip tutorial
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Settings Modal ── */}
+      <AnimatePresence>
+        {showSettings && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-xl flex items-center justify-center p-4"
+            onClick={(e) => { if (e.target === e.currentTarget) setShowSettings(false); }}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              transition={{ type: 'spring', damping: 20 }}
+              className="bg-zinc-950 border border-white/10 rounded-3xl max-w-md w-full shadow-2xl overflow-hidden"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between p-6 border-b border-white/5">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center">
+                    <Settings2 className="w-4 h-4 text-white/60" />
+                  </div>
+                  <h2 className="text-sm font-bold uppercase tracking-widest text-white">Settings</h2>
+                </div>
+                <button onClick={() => setShowSettings(false)} className="text-white/30 hover:text-white/80 transition-colors">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-6 flex flex-col gap-6">
+                {/* API Key section */}
+                <div className="flex flex-col gap-3">
+                  <div className="flex items-center gap-2">
+                    <Key className="w-3.5 h-3.5 text-amber-400" />
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-white/50">
+                      Gemini API Key
+                    </label>
+                    {savedApiKey && (
+                      <span className="ml-auto flex items-center gap-1 text-[9px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
+                        <CheckCircle2 className="w-2.5 h-2.5" /> Saved
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-white/30 leading-relaxed">
+                    Required for AI mixing, lyric generation, and mastering. Get a free key at{' '}
+                    <span className="text-amber-400/70">aistudio.google.com</span>.
+                  </p>
+                  <div className="relative">
+                    <input
+                      type={showKeyValue ? 'text' : 'password'}
+                      value={manualApiKey}
+                      onChange={(e) => setManualApiKey(e.target.value)}
+                      placeholder="AIza..."
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 pr-10 text-sm text-white/80 placeholder-white/20 focus:outline-none focus:border-white/20 font-mono transition-all"
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleSaveApiKey(); }}
+                    />
+                    <button
+                      onClick={() => setShowKeyValue(v => !v)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/70 transition-colors"
+                    >
+                      {showKeyValue ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleSaveApiKey}
+                      disabled={!manualApiKey.trim()}
+                      className="flex-1 py-2.5 bg-white text-black font-bold rounded-xl text-xs uppercase tracking-widest hover:bg-white/90 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      Save Key
+                    </button>
+                    {savedApiKey && (
+                      <button
+                        onClick={handleClearApiKey}
+                        className="px-4 py-2.5 bg-red-500/10 border border-red-500/20 text-red-400 font-bold rounded-xl text-xs uppercase tracking-widest hover:bg-red-500/20 transition-all"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Divider */}
+                <div className="border-t border-white/5" />
+
+                {/* Tutorial launcher */}
+                <button
+                  onClick={() => { setShowSettings(false); setTutorialStep(0); setShowTutorial(true); }}
+                  className="flex items-center gap-3 w-full p-4 bg-white/3 hover:bg-white/5 border border-white/5 rounded-2xl transition-all group"
+                >
+                  <div className="w-8 h-8 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center">
+                    <HelpCircle className="w-4 h-4 text-violet-400" />
+                  </div>
+                  <div className="text-left">
+                    <p className="text-xs font-bold text-white/70">View Tutorial</p>
+                    <p className="text-[10px] text-white/30">Replay the getting started guide</p>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-white/20 ml-auto group-hover:text-white/50 transition-colors" />
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <div className="min-h-screen bg-[#050505] text-zinc-100 font-sans overflow-x-hidden relative flex items-center justify-center">
       
       {/* Hidden Audio Elements for Playback */}
@@ -886,13 +1213,32 @@ export default function App() {
           </h1>
         </motion.div>
         
-        <motion.div 
+        <motion.div
           initial={{ opacity: 0, x: 20 }}
           animate={{ opacity: 1, x: 0 }}
-          className="flex items-center gap-2 text-[10px] font-mono text-white/40 bg-white/5 px-4 py-2 rounded-full border border-white/10 backdrop-blur-md pointer-events-auto"
+          className="flex items-center gap-2 pointer-events-auto"
         >
-          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-          SYSTEM ONLINE
+          {/* Tutorial button */}
+          <button
+            onClick={() => { setTutorialStep(0); setShowTutorial(true); }}
+            title="How to use"
+            className="w-9 h-9 flex items-center justify-center rounded-full bg-white/5 border border-white/10 backdrop-blur-md text-white/50 hover:text-white hover:bg-white/10 transition-all"
+          >
+            <HelpCircle className="w-4 h-4" />
+          </button>
+          {/* Settings button */}
+          <button
+            onClick={() => setShowSettings(true)}
+            title="Settings"
+            className="w-9 h-9 flex items-center justify-center rounded-full bg-white/5 border border-white/10 backdrop-blur-md text-white/50 hover:text-white hover:bg-white/10 transition-all"
+          >
+            <Settings2 className="w-4 h-4" />
+          </button>
+          {/* Status pill */}
+          <div className="flex items-center gap-2 text-[10px] font-mono text-white/40 bg-white/5 px-4 py-2 rounded-full border border-white/10 backdrop-blur-md">
+            <span className={`w-2 h-2 rounded-full animate-pulse ${savedApiKey || process.env.GEMINI_API_KEY ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
+            {savedApiKey || process.env.GEMINI_API_KEY ? 'SYSTEM ONLINE' : 'NO API KEY'}
+          </div>
         </motion.div>
       </header>
 
@@ -1347,15 +1693,15 @@ export default function App() {
                       <div className="space-y-2">
                         <div className="flex justify-between items-center text-[10px]">
                           <span className="text-white/60">Loudness</span>
-                          <span className="font-mono text-emerald-400">-14.2 LUFS</span>
+                          <span className="font-mono text-white/40">Normalized</span>
                         </div>
                         <div className="flex justify-between items-center text-[10px]">
                           <span className="text-white/60">Peak</span>
-                          <span className="font-mono text-emerald-400">-1.0 dB</span>
+                          <span className="font-mono text-white/40">Limited</span>
                         </div>
                         <div className="flex justify-between items-center text-[10px]">
-                          <span className="text-white/60">Width</span>
-                          <span className="font-mono text-emerald-400">Optimal</span>
+                          <span className="text-white/60">Format</span>
+                          <span className="font-mono text-emerald-400">WAV 44.1kHz</span>
                         </div>
                       </div>
                     </div>

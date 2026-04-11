@@ -47,7 +47,8 @@ async function startServer() {
       // Clean up the local uploaded file
       fs.unlinkSync(req.file.path);
 
-      res.json(response.data);
+      // Normalize snake_case job_id from Python service to camelCase for the client
+      res.json({ ...response.data, jobId: response.data.job_id });
     } catch (error: any) {
       console.error('Error in separation:', error.message);
       if (req.file && fs.existsSync(req.file.path)) {
@@ -73,11 +74,12 @@ async function startServer() {
   app.get('/api/separate/download/:jobId/:filename', async (req, res) => {
     try {
       const separatorUrl = process.env.AUDIO_SEPARATOR_URL || 'http://localhost:8000';
-      const response = await axios.get(`${separatorUrl}/download/${req.params.jobId}/${req.params.filename}`, {
+      const safeFilename = path.basename(req.params.filename);
+      const response = await axios.get(`${separatorUrl}/download/${req.params.jobId}/${safeFilename}`, {
         responseType: 'stream'
       });
-      
-      res.setHeader('Content-Disposition', `attachment; filename="${req.params.filename}"`);
+
+      res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
       response.data.pipe(res);
     } catch (error: any) {
       console.error('Error downloading stem:', error.message);
@@ -114,7 +116,8 @@ async function startServer() {
       fs.unlinkSync(targetFile.path);
       fs.unlinkSync(referenceFile.path);
 
-      res.json(response.data);
+      // Normalize snake_case job_id from Python service to camelCase for the client
+      res.json({ ...response.data, jobId: response.data.job_id });
     } catch (error: any) {
       console.error('Error in mastering:', error.message);
       const files = req.files as { [fieldname: string]: Express.Multer.File[] };
@@ -140,11 +143,12 @@ async function startServer() {
   app.get('/api/master/download/:jobId/:filename', async (req, res) => {
     try {
       const matcheringUrl = process.env.AUDIO_MATCHER_URL || 'http://localhost:8001';
-      const response = await axios.get(`${matcheringUrl}/download/${req.params.jobId}/${req.params.filename}`, {
+      const safeFilename = path.basename(req.params.filename);
+      const response = await axios.get(`${matcheringUrl}/download/${req.params.jobId}/${safeFilename}`, {
         responseType: 'stream'
       });
-      
-      res.setHeader('Content-Disposition', `attachment; filename="${req.params.filename}"`);
+
+      res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
       response.data.pipe(res);
     } catch (error: any) {
       console.error('Error downloading mastered file:', error.message);

@@ -80,13 +80,13 @@ export async function runAIAgentNetwork(
   onProgress: (log: AILog) => void
 ): Promise<{ settings: MixSettings, reasoning: string }> {
   
-  const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || localStorage.getItem('gemini_api_key') || '';
   if (!apiKey) {
-    throw new Error("API Key is missing. Please select an API key.");
+    throw new Error("API Key is missing. Add your Gemini API key in Settings.");
   }
 
   const ai = new GoogleGenAI({ apiKey });
-  const model = 'gemini-3-flash-preview';
+  const model = 'gemini-2.0-flash';
 
   try {
     let currentSettings: any = null;
