@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Upload, Mic, Square, Settings2, Download, Music, Loader2, Volume2, Waves, RotateCcw, Sparkles, Bot, CheckCircle2, Flame, Play, Layers, FastForward, Activity, Sliders, Ear, AlertTriangle, X, SplitSquareHorizontal, FileText, Wand2, Minimize2, History, Key, ChevronRight, ChevronLeft, HelpCircle, Eye, EyeOff } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 import { mixAudio, processBeat, MixSettings, defaultMixSettings, GenrePreset, applyGenrePreset, genrePresets } from './lib/audioUtils';
-import { runAIAgentNetwork, AILog } from './lib/aiMixer';
+import { runAIAgentNetwork, AILog, ParameterDelta, ConfidenceLevel } from './lib/aiMixer';
 import { motion, AnimatePresence } from 'motion/react';
 import { analyzeFullBuffer } from 'realtime-bpm-analyzer';
 
@@ -10,12 +10,59 @@ import { analyzeFullBuffer } from 'realtime-bpm-analyzer';
 
 const getAgentStyle = (agentName: string) => {
   if (agentName.includes('Analyst')) return { color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/20', icon: Activity };
+  if (agentName.includes('Genre')) return { color: 'text-teal-400', bg: 'bg-teal-500/10', border: 'border-teal-500/20', icon: Music };
   if (agentName.includes('Mix Engineer')) return { color: 'text-violet-400', bg: 'bg-violet-500/10', border: 'border-violet-500/20', icon: Sliders };
   if (agentName.includes('Review')) return { color: 'text-amber-400', bg: 'bg-amber-500/10', border: 'border-amber-500/20', icon: Ear };
   if (agentName.includes('Mastering')) return { color: 'text-rose-400', bg: 'bg-rose-500/10', border: 'border-rose-500/20', icon: Sparkles };
   if (agentName.includes('System Error')) return { color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/20', icon: AlertTriangle };
   if (agentName.includes('System')) return { color: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/20', icon: CheckCircle2 };
   return { color: 'text-zinc-400', bg: 'bg-zinc-500/10', border: 'border-zinc-500/20', icon: Bot };
+};
+
+const ConfidenceBadge = ({ level }: { level: ConfidenceLevel }) => {
+  const cfg: Record<ConfidenceLevel, { color: string; bg: string; border: string; dot: string }> = {
+    high:   { color: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', dot: 'bg-emerald-400' },
+    medium: { color: 'text-amber-400',   bg: 'bg-amber-500/10',   border: 'border-amber-500/30',   dot: 'bg-amber-400' },
+    low:    { color: 'text-red-400',     bg: 'bg-red-500/10',     border: 'border-red-500/30',     dot: 'bg-red-400' },
+  };
+  const c = cfg[level];
+  return (
+    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[7px] font-bold uppercase tracking-wider ${c.color} ${c.bg} border ${c.border}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
+      {level}
+    </span>
+  );
+};
+
+const formatDeltaVal = (val: number, unit: string): string => {
+  if (unit === '%') return `${Math.round(val * 100)}%`;
+  if (unit === 'dB' || unit === 'LUFS') return `${val.toFixed(1)}`;
+  if (unit === 'Hz') return `${Math.round(val)}`;
+  if (unit === ':1') return `${val.toFixed(1)}`;
+  return `${val.toFixed(2)}`;
+};
+
+const ParameterDeltaRow = ({ delta }: { delta: ParameterDelta }) => {
+  const change = delta.after - delta.before;
+  const isIncrease = change > 0;
+  const absDiff = Math.abs(change);
+  const diffStr = delta.unit === '%'
+    ? `${Math.round(absDiff * 100)}%`
+    : delta.unit === 'dB' || delta.unit === 'LUFS'
+      ? `${absDiff.toFixed(1)}${delta.unit}`
+      : `${absDiff.toFixed(2)} ${delta.unit}`;
+  return (
+    <div className="flex items-center justify-between text-[8px] py-0.5">
+      <span className="text-white/40">{delta.label}</span>
+      <div className="flex items-center gap-1.5 font-mono">
+        <span className="text-white/25">{formatDeltaVal(delta.before, delta.unit)}</span>
+        <span className={`font-bold ${isIncrease ? 'text-emerald-400' : 'text-rose-400'}`}>
+          {isIncrease ? '↑' : '↓'}{diffStr}
+        </span>
+        <span className="text-white/60">{formatDeltaVal(delta.after, delta.unit)}</span>
+      </div>
+    </div>
+  );
 };
 
 const ProSlider = ({ 
@@ -270,6 +317,8 @@ export default function App() {
   const [isAiMixing, setIsAiMixing] = useState(false);
   const [aiLogs, setAiLogs] = useState<AILog[]>([]);
   const [aiReasoning, setAiReasoning] = useState('');
+  const [expandedLogIndex, setExpandedLogIndex] = useState<number | null>(null);
+  const [activeAgentPhase, setActiveAgentPhase] = useState<string | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   
   const [lyrics, setLyrics] = useState('');
@@ -795,10 +844,13 @@ export default function App() {
     
     setIsAiMixing(true);
     setAiLogs([]);
-    
+    setExpandedLogIndex(null);
+    setActiveAgentPhase(null);
+
     try {
       const result = await runAIAgentNetwork(vocalBlob, beatBlob, backupVocalBlob, aiIterations, (log) => {
         setAiLogs(prev => [...prev, log]);
+        if (log.phase) setActiveAgentPhase(log.phase);
       });
       
       setSettings(result.settings);
@@ -819,6 +871,7 @@ export default function App() {
       }]);
     } finally {
       setIsAiMixing(false);
+      setActiveAgentPhase(null);
     }
   };
 
@@ -1730,6 +1783,39 @@ export default function App() {
                       )}
                     </div>
                     
+                    {/* Agent Phase Progress Tracker */}
+                    {isAiMixing && (
+                      <div className="flex items-center gap-1 mb-0 bg-white/3 rounded-xl p-2.5 border border-white/5">
+                        {([
+                          { phase: 'analysis',  label: 'Analyse', color: 'bg-blue-500',   glow: 'shadow-blue-500/50'   },
+                          { phase: 'genre',     label: 'Genre',   color: 'bg-teal-500',   glow: 'shadow-teal-500/50'   },
+                          { phase: 'mixing',    label: 'Mix',     color: 'bg-violet-500', glow: 'shadow-violet-500/50' },
+                          { phase: 'review',    label: 'Review',  color: 'bg-amber-500',  glow: 'shadow-amber-500/50'  },
+                          { phase: 'mastering', label: 'Master',  color: 'bg-rose-500',   glow: 'shadow-rose-500/50'   },
+                        ] as const).map(({ phase, label, color, glow }, idx, arr) => {
+                          const isActive = activeAgentPhase === phase;
+                          const isDone = aiLogs.some(l => l.phase === phase);
+                          return (
+                            <React.Fragment key={phase}>
+                              <div className="flex flex-col items-center gap-1 flex-shrink-0">
+                                <div className={`w-2 h-2 rounded-full transition-all duration-300 ${
+                                  isActive ? `${color} shadow-lg ${glow} scale-125` :
+                                  isDone   ? `${color} opacity-60` :
+                                             'bg-white/10'
+                                }`} />
+                                <span className={`text-[6px] uppercase tracking-wider transition-colors duration-300 ${
+                                  isActive ? 'text-white/80' : isDone ? 'text-white/40' : 'text-white/15'
+                                }`}>{label}</span>
+                              </div>
+                              {idx < arr.length - 1 && (
+                                <div className={`flex-1 h-px transition-all duration-500 ${isDone ? 'bg-white/20' : 'bg-white/5'}`} />
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
+                      </div>
+                    )}
+
                     <div className="flex-1 bg-[#050505] rounded-xl border border-white/10 p-4 overflow-y-auto font-mono text-[10px] shadow-[inset_0_0_20px_rgba(0,0,0,0.8)] no-scrollbar min-h-[200px]">
                       {aiLogs.length === 0 && !isAiMixing ? (
                         <div className="h-full flex flex-col items-center justify-center text-white/20 text-center p-2">
@@ -1741,16 +1827,63 @@ export default function App() {
                           {aiLogs.map((log, index) => {
                             const style = getAgentStyle(log.agent);
                             const Icon = style.icon;
+                            const isLast = index === aiLogs.length - 1;
+                            const isExpanded = expandedLogIndex === index;
+                            const hasExpandable = !!(log.thoughtProcess);
                             return (
                               <motion.div key={index} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} className="relative">
-                                {index !== aiLogs.length - 1 && <div className="absolute left-[11px] top-6 bottom-[-16px] w-[1px] bg-white/5" />}
+                                {!isLast && <div className="absolute left-[11px] top-6 bottom-[-16px] w-[1px] bg-white/5" />}
                                 <div className="flex gap-3">
                                   <div className={`relative z-10 flex-shrink-0 w-6 h-6 rounded-full ${style.bg} ${style.border} border flex items-center justify-center`}>
                                     <Icon className={`w-3 h-3 ${style.color}`} />
                                   </div>
-                                  <div className="flex-1 pt-1">
-                                    <div className={`font-semibold mb-0.5 text-[9px] uppercase tracking-wider ${style.color}`}>{log.agent}</div>
+                                  <div className="flex-1 pt-0.5 min-w-0">
+                                    {/* Header: agent name + confidence + duration */}
+                                    <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                                      <span className={`font-semibold text-[9px] uppercase tracking-wider ${style.color}`}>{log.agent}</span>
+                                      {log.confidence && <ConfidenceBadge level={log.confidence} />}
+                                      {log.durationMs !== undefined && (
+                                        <span className="text-[7px] text-white/20 font-mono ml-auto">{(log.durationMs / 1000).toFixed(1)}s</span>
+                                      )}
+                                    </div>
                                     <div className="text-white/80 leading-relaxed mb-1">{log.message}</div>
+                                    {log.details && (
+                                      <div className="text-white/40 text-[9px] leading-relaxed whitespace-pre-line mb-1">{log.details}</div>
+                                    )}
+                                    {/* Parameter deltas */}
+                                    {log.parameterDeltas && log.parameterDeltas.length > 0 && (
+                                      <div className="mt-1.5 bg-white/3 rounded-lg p-2 border border-white/5">
+                                        <div className="text-[7px] font-bold uppercase tracking-widest text-white/25 mb-1.5">Parameter Changes</div>
+                                        {log.parameterDeltas.map((d, di) => (
+                                          <ParameterDeltaRow key={di} delta={d} />
+                                        ))}
+                                      </div>
+                                    )}
+                                    {/* Expand/collapse reasoning */}
+                                    {hasExpandable && (
+                                      <button
+                                        onClick={() => setExpandedLogIndex(isExpanded ? null : index)}
+                                        className="mt-1 flex items-center gap-1 text-[7px] text-white/25 hover:text-white/60 transition-colors"
+                                      >
+                                        <ChevronRight className={`w-2.5 h-2.5 transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`} />
+                                        {isExpanded ? 'hide reasoning' : 'show reasoning'}
+                                      </button>
+                                    )}
+                                    <AnimatePresence>
+                                      {isExpanded && log.thoughtProcess && (
+                                        <motion.div
+                                          initial={{ height: 0, opacity: 0 }}
+                                          animate={{ height: 'auto', opacity: 1 }}
+                                          exit={{ height: 0, opacity: 0 }}
+                                          transition={{ duration: 0.2 }}
+                                          className="overflow-hidden"
+                                        >
+                                          <div className="mt-1 bg-black/60 rounded-lg p-2 border border-white/5 max-h-32 overflow-y-auto no-scrollbar">
+                                            <pre className="text-[7px] text-white/35 whitespace-pre-wrap font-mono leading-relaxed">{log.thoughtProcess}</pre>
+                                          </div>
+                                        </motion.div>
+                                      )}
+                                    </AnimatePresence>
                                   </div>
                                 </div>
                               </motion.div>
@@ -1759,10 +1892,25 @@ export default function App() {
                           {isAiMixing && (
                             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-3">
                               <div className="relative z-10 flex-shrink-0 w-6 h-6 rounded-full bg-white/5 border border-white/10 flex items-center justify-center">
-                                <Loader2 className="w-3 h-3 text-white/40 animate-spin" />
+                                <motion.div
+                                  className="absolute inset-0 rounded-full border border-amber-400/50"
+                                  animate={{ scale: [1, 1.6, 1], opacity: [0.6, 0, 0.6] }}
+                                  transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
+                                />
+                                <div className="w-2 h-2 rounded-full bg-amber-400/60" />
                               </div>
                               <div className="flex-1 pt-1.5">
-                                <div className="flex items-center text-white/40 text-[9px] uppercase tracking-widest">Processing...</div>
+                                <div className="flex items-center gap-1.5 text-white/40 text-[9px] uppercase tracking-widest">
+                                  <span>Processing</span>
+                                  {[0, 1, 2].map(i => (
+                                    <motion.span
+                                      key={i}
+                                      className="w-1 h-1 rounded-full bg-white/30 inline-block"
+                                      animate={{ opacity: [0.2, 1, 0.2] }}
+                                      transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2 }}
+                                    />
+                                  ))}
+                                </div>
                               </div>
                             </motion.div>
                           )}
@@ -1774,6 +1922,23 @@ export default function App() {
                     <div className="bg-white/5 p-4 rounded-xl border border-white/10">
                       <ProSlider label="AI Passes" icon={Bot} value={aiIterations} min={1} max={4} step={1} onChange={(v) => setAiIterations(v)} formatValue={(v) => `${v}`} colorClass="bg-amber-500" glowClass="shadow-amber-500/50" />
                     </div>
+
+                    {aiLogs.length > 0 && !isAiMixing && (
+                      <button
+                        onClick={() => {
+                          const text = aiLogs.map(l =>
+                            `[${l.agent}]${l.confidence ? ` (${l.confidence})` : ''} ${l.message}` +
+                            (l.details ? `\n${l.details}` : '') +
+                            (l.parameterDeltas?.length ? '\nChanges: ' + l.parameterDeltas.map(d => `${d.label}: ${formatDeltaVal(d.before, d.unit)}→${formatDeltaVal(d.after, d.unit)}${d.unit}`).join(', ') : '') +
+                            (l.durationMs !== undefined ? `\nDuration: ${(l.durationMs / 1000).toFixed(1)}s` : '')
+                          ).join('\n\n');
+                          navigator.clipboard.writeText(text);
+                        }}
+                        className="w-full py-2 text-[8px] font-bold uppercase tracking-widest text-white/30 hover:text-white/60 border border-white/5 rounded-xl transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <FileText className="w-3 h-3" /> Copy Session Log
+                      </button>
+                    )}
 
                     <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleAutoMix} disabled={isAiMixing || isProcessing} className="w-full py-3 px-4 rounded-xl text-[10px] font-bold uppercase tracking-widest text-black bg-amber-400 hover:bg-amber-300 transition-colors shadow-[0_0_20px_rgba(251,191,36,0.3)] flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed">
                       {isAiMixing ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Network Active...</> : <><Sparkles className="w-4 h-4 mr-2" /> Deploy AI Agent</>}

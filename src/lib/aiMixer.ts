@@ -16,10 +16,32 @@ import {
   applyGenrePreset,
 } from './audioUtils';
 
+export type ConfidenceLevel = 'high' | 'medium' | 'low';
+
+export interface ParameterDelta {
+  param: string;
+  label: string;
+  before: number;
+  after: number;
+  unit: string;
+}
+
+export interface AgentMemoryProfile {
+  genre: string;
+  spectralFingerprint: { dominantFreq: number; subBassRatio: number; brillianceRatio: number; };
+  settingsSnapshot: { lufsTarget: number; reverb: number; saturation: number; sidechainDuck: number; };
+  createdAt: string;
+}
+
 export interface AILog {
   agent: string;
   message: string;
   details?: string;
+  confidence?: ConfidenceLevel;
+  thoughtProcess?: string;
+  parameterDeltas?: ParameterDelta[];
+  durationMs?: number;
+  phase?: 'analysis' | 'mixing' | 'review' | 'mastering' | 'genre' | 'system';
 }
 
 async function blobToGenerativePart(blob: Blob) {
@@ -309,9 +331,11 @@ export async function runAIAgentNetwork(
     // PRE-ANALYSIS: Data-Driven Audio Measurements
     // ═══════════════════════════════════════════════════════════════
 
+    const analystStartTime = Date.now();
     onProgress({
       agent: 'Acoustic Analyst',
       message: 'Running spectral analysis, loudness measurement, and sibilance detection on all tracks...',
+      phase: 'analysis',
     });
 
     const vocalBuffer = await decodeBlob(vocalBlob);
@@ -340,6 +364,8 @@ export async function runAIAgentNetwork(
       ].join('\n'),
     });
 
+    let detectedGenre = 'hip-hop';
+
     for (let i = 1; i <= iterations; i++) {
       if (i === 1) {
         // ═══════════════════════════════════════════════════════════════
@@ -347,7 +373,8 @@ export async function runAIAgentNetwork(
         // ═══════════════════════════════════════════════════════════════
         onProgress({
           agent: 'Acoustic Analyst',
-          message: 'Combining AI listening with numerical analysis for comprehensive assessment...'
+          message: 'Combining AI listening with numerical analysis for comprehensive assessment...',
+          phase: 'analysis',
         });
 
         const analysisPrompt = `You are an expert acoustic analyst and mix engineer. Listen to these audio tracks and analyze them in combination with the numerical measurements provided.
@@ -382,17 +409,85 @@ Provide a detailed acoustic assessment with specific frequency recommendations.`
         onProgress({
           agent: 'Acoustic Analyst',
           message: 'Comprehensive acoustic analysis complete.',
-          details: analysisText
+          details: analysisText,
+          phase: 'analysis',
+          durationMs: Date.now() - analystStartTime,
         });
+
+        // ═══════════════════════════════════════════════════════════════
+        // AGENT 1b: Genre Intelligence Agent
+        // ═══════════════════════════════════════════════════════════════
+        const genreStartTime = Date.now();
+        const memoryProfiles = loadAgentMemory();
+        const matchedProfile = findClosestProfile(memoryProfiles, vocalAnalysis, beatAnalysis);
+
+        if (matchedProfile) {
+          detectedGenre = matchedProfile.genre;
+          onProgress({
+            agent: 'Genre Intelligence',
+            message: `Memory hit: loaded ${detectedGenre} profile from previous session.`,
+            details: `Matched on spectral fingerprint — dominant freq ${matchedProfile.spectralFingerprint.dominantFreq.toFixed(0)}Hz. LUFS target: ${matchedProfile.settingsSnapshot.lufsTarget}`,
+            confidence: 'high',
+            phase: 'genre',
+            durationMs: Date.now() - genreStartTime,
+          });
+        } else {
+          onProgress({
+            agent: 'Genre Intelligence',
+            message: 'Analyzing spectral fingerprint to detect genre...',
+            phase: 'genre',
+          });
+
+          const genrePrompt = `You are a music genre expert. Analyze the following audio measurements and acoustic analysis to determine the genre of this track.
+
+${vocalAnalysisStr}
+
+${beatAnalysisStr}
+
+═══ ACOUSTIC ANALYSIS ═══
+${analysisText}
+
+Based on the spectral characteristics, dynamic range, frequency distribution, and overall sonic profile — detect the genre.
+- Sub-bass heavy + mid-range vocal = hip-hop
+- Bright highs + tight compression = pop
+- Wide stereo + heavy sub + brilliance = electronic
+- Natural dynamics + minimal low end = acoustic
+
+Output JSON only.`;
+
+          const genreResponse = await ai.models.generateContent({
+            model,
+            contents: genrePrompt,
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: genreAnalysisSchema as any,
+            }
+          });
+
+          const genreResult = JSON.parse(genreResponse.text || '{}');
+          detectedGenre = genreResult.detectedGenre || 'hip-hop';
+
+          onProgress({
+            agent: 'Genre Intelligence',
+            message: `Detected genre: ${detectedGenre.toUpperCase()}`,
+            details: genreResult.genreReasoning || '',
+            confidence: (genreResult.confidence as ConfidenceLevel) || 'medium',
+            thoughtProcess: JSON.stringify(genreResult, null, 2),
+            phase: 'genre',
+            durationMs: Date.now() - genreStartTime,
+          });
+        }
 
         await delay(2500);
 
         // ═══════════════════════════════════════════════════════════════
         // AGENT 2: Mix Engineer (Data-Driven Initial Draft)
         // ═══════════════════════════════════════════════════════════════
+        const mixStartTime = Date.now();
         onProgress({
           agent: 'Mix Engineer',
-          message: 'Drafting mix strategy using acoustic analysis and measurements...'
+          message: 'Drafting mix strategy using acoustic analysis and measurements...',
+          phase: 'mixing',
         });
 
         const mixSchema = {
@@ -402,7 +497,9 @@ Provide a detailed acoustic assessment with specific frequency recommendations.`
               type: "OBJECT",
               properties: mixSettingsSchemaProperties
             },
-            reasoning: detailedReasoningSchema
+            reasoning: detailedReasoningSchema,
+            confidence: { type: "STRING", description: "Your overall confidence in these settings: 'high', 'medium', or 'low'" },
+            confidenceReason: { type: "STRING", description: "Brief reason for your confidence level" },
           }
         };
 
@@ -443,7 +540,7 @@ MASTERING CHAIN:
 - Master EQ: Sweetening. Very subtle moves (±2dB max).
 - Soft clipper: Shave transient peaks before limiter (0.1-0.3).
 - Limiter ceiling: -1.0 dBTP for streaming safety.
-- LUFS target: ${vocalAnalysis.loudness.estimatedLUFS < -18 ? '-10 (needs significant gain)' : '-9 (standard competitive loudness)'}
+- LUFS target: ${vocalAnalysis.loudness.estimatedLUFS < -18 ? '-10 (needs significant gain)' : '-9 (standard competitive loudness)'} — detected genre: ${detectedGenre}
 
 CRITICAL RULES:
 - If sibilance was detected, ENABLE the de-esser and set frequency to the detected peak.
@@ -475,7 +572,11 @@ Output JSON only.`;
             `Compression: ${draftMix.reasoning?.compressionReasoning || 'Applied'}`,
             `De-Esser: ${draftMix.reasoning?.deEsserReasoning || 'Checked'}`,
             `Spatial: ${draftMix.reasoning?.spatialReasoning || 'Configured'}`,
-          ].join('\n')
+          ].join('\n'),
+          confidence: (draftMix.confidence as ConfidenceLevel) || 'medium',
+          thoughtProcess: JSON.stringify(draftMix.reasoning, null, 2),
+          phase: 'mixing',
+          durationMs: Date.now() - mixStartTime,
         });
 
         await delay(2500);
@@ -484,9 +585,11 @@ Output JSON only.`;
         // ═══════════════════════════════════════════════════════════════
         // AGENT 4: Review Engineer (Iterative Refinement)
         // ═══════════════════════════════════════════════════════════════
+        const reviewStartTime = Date.now();
         onProgress({
           agent: `Review Engineer (Pass ${i})`,
-          message: `Rendering current mix to analyze and refine...`
+          message: `Rendering current mix to analyze and refine...`,
+          phase: 'review',
         });
 
         // Render the current mix with current settings
@@ -513,7 +616,8 @@ Output JSON only.`;
               properties: mixSettingsSchemaProperties
             },
             reasoning: detailedReasoningSchema,
-            critique: { type: "STRING", description: "Specific critique of the current mix and what was changed." }
+            critique: { type: "STRING", description: "Specific critique of the current mix and what was changed." },
+            confidence: { type: "STRING", description: "Confidence in these refined settings: 'high', 'medium', or 'low'" },
           }
         };
 
@@ -553,12 +657,19 @@ Output JSON only.`;
         });
 
         const updatedMix = JSON.parse(reviewResponse.text || "{}");
-        currentSettings = updatedMix.settings;
+        const previousSettings = JSON.parse(JSON.stringify(currentSettings));
+        currentSettings = deepMergeSettings(defaultMixSettings, updatedMix.settings);
+        const paramDeltas = computeParameterDeltas(previousSettings, currentSettings);
 
         onProgress({
           agent: `Review Engineer (Pass ${i})`,
           message: `Mix refinement complete.`,
-          details: `Critique: ${updatedMix.critique}\nMastering: ${updatedMix.reasoning?.masteringReasoning || 'Adjusted'}`
+          details: `Critique: ${updatedMix.critique}\nMastering: ${updatedMix.reasoning?.masteringReasoning || 'Adjusted'}`,
+          confidence: (updatedMix.confidence as ConfidenceLevel) || 'medium',
+          thoughtProcess: JSON.stringify(updatedMix.reasoning, null, 2),
+          parameterDeltas: paramDeltas,
+          phase: 'review',
+          durationMs: Date.now() - reviewStartTime,
         });
 
         await delay(3000);
@@ -568,9 +679,11 @@ Output JSON only.`;
     // ═══════════════════════════════════════════════════════════════
     // AGENT 3: Mastering Engineer (Final Polish)
     // ═══════════════════════════════════════════════════════════════
+    const masterStartTime = Date.now();
     onProgress({
       agent: 'Mastering Engineer',
-      message: 'Applying final mastering checks with loudness and spectral analysis...'
+      message: 'Applying final mastering checks with loudness and spectral analysis...',
+      phase: 'mastering',
     });
 
     const masterSchema = {
@@ -643,14 +756,32 @@ Output JSON only.`;
     });
 
     const finalResult = JSON.parse(masterResponse.text || "{}");
+    const finalSettings = deepMergeSettings(defaultMixSettings, finalResult.settings);
+
     onProgress({
       agent: 'Mastering Engineer',
       message: 'Mastering and final approval complete.',
-      details: finalResult.masteringNotes
+      details: finalResult.masteringNotes,
+      phase: 'mastering',
+      durationMs: Date.now() - masterStartTime,
     });
 
-    // Merge the AI settings with defaults to ensure all fields are populated
-    const finalSettings = deepMergeSettings(defaultMixSettings, finalResult.settings);
+    // Save successful run to agent memory
+    saveAgentMemory({
+      genre: detectedGenre,
+      spectralFingerprint: {
+        dominantFreq: vocalAnalysis.spectral.dominantFrequency,
+        subBassRatio: vocalAnalysis.spectral.subBass / Math.max(vocalAnalysis.loudness.rmsDB + 60, 1),
+        brillianceRatio: vocalAnalysis.spectral.brilliance / Math.max(vocalAnalysis.loudness.rmsDB + 60, 1),
+      },
+      settingsSnapshot: {
+        lufsTarget: finalSettings.lufsTarget,
+        reverb: finalSettings.reverb,
+        saturation: finalSettings.saturation,
+        sidechainDuck: finalSettings.sidechainDuck,
+      },
+      createdAt: new Date().toISOString(),
+    });
 
     return {
       settings: finalSettings,
@@ -668,6 +799,90 @@ Output JSON only.`;
     throw error;
   }
 }
+
+// ─── Agent Memory Helpers ────────────────────────────────────────────────────
+
+function loadAgentMemory(): AgentMemoryProfile[] {
+  try {
+    const raw = localStorage.getItem('agent_memory_profiles');
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveAgentMemory(profile: AgentMemoryProfile): void {
+  try {
+    const profiles = loadAgentMemory();
+    const updated = [profile, ...profiles.filter(p => p.genre !== profile.genre)].slice(0, 8);
+    localStorage.setItem('agent_memory_profiles', JSON.stringify(updated));
+  } catch { /* ignore localStorage errors */ }
+}
+
+function findClosestProfile(
+  profiles: AgentMemoryProfile[],
+  vocalAnalysis: FullAudioAnalysis,
+  beatAnalysis: FullAudioAnalysis
+): AgentMemoryProfile | null {
+  if (!profiles.length) return null;
+  const dominantFreq = vocalAnalysis.spectral.dominantFrequency;
+  const subBassRatio = vocalAnalysis.spectral.subBass / Math.max(beatAnalysis.loudness.rmsDB + 60, 1);
+  const brillianceRatio = vocalAnalysis.spectral.brilliance / Math.max(beatAnalysis.loudness.rmsDB + 60, 1);
+  for (const p of profiles) {
+    const freqMatch = Math.abs(p.spectralFingerprint.dominantFreq - dominantFreq) < 200;
+    const bassMatch = Math.abs(p.spectralFingerprint.subBassRatio - subBassRatio) < 0.15;
+    const brillMatch = Math.abs(p.spectralFingerprint.brillianceRatio - brillianceRatio) < 0.20;
+    if (freqMatch && bassMatch && brillMatch) return p;
+  }
+  return null;
+}
+
+// ─── Parameter Delta Computation ─────────────────────────────────────────────
+
+const PARAM_META: Record<string, { label: string; unit: string }> = {
+  vocalVolume:               { label: 'Vocal Level',       unit: '%'    },
+  beatVolume:                { label: 'Beat Level',        unit: '%'    },
+  reverb:                    { label: 'Reverb',            unit: '%'    },
+  echo:                      { label: 'Delay',             unit: '%'    },
+  doubler:                   { label: 'Doubler',           unit: '%'    },
+  saturation:                { label: 'Saturation',        unit: '%'    },
+  masterGain:                { label: 'Master Gain',       unit: 'x'    },
+  lufsTarget:                { label: 'LUFS Target',       unit: 'LUFS' },
+  sidechainDuck:             { label: 'Sidechain Duck',    unit: '%'    },
+  'vocalEQ.presenceGain':    { label: 'Presence',          unit: 'dB'   },
+  'vocalEQ.airGain':         { label: 'Air',               unit: 'dB'   },
+  'vocalEQ.lowMidGain':      { label: 'Mud Cut',           unit: 'dB'   },
+  'vocalEQ.lowCutFreq':      { label: 'HPF',               unit: 'Hz'   },
+  'vocalCompressor.threshold': { label: 'Comp Threshold',  unit: 'dB'   },
+  'vocalCompressor.ratio':   { label: 'Comp Ratio',        unit: ':1'   },
+  'stereoImaging.width':     { label: 'Stereo Width',      unit: '%'    },
+};
+
+function computeParameterDeltas(before: any, after: any): ParameterDelta[] {
+  const deltas: ParameterDelta[] = [];
+  for (const [key, meta] of Object.entries(PARAM_META)) {
+    const parts = key.split('.');
+    let bVal: any = before;
+    let aVal: any = after;
+    for (const p of parts) { bVal = bVal?.[p]; aVal = aVal?.[p]; }
+    if (typeof bVal === 'number' && typeof aVal === 'number' && Math.abs(aVal - bVal) > 0.01) {
+      deltas.push({ param: key, label: meta.label, before: bVal, after: aVal, unit: meta.unit });
+    }
+  }
+  return deltas
+    .sort((a, b) => Math.abs(b.after - b.before) - Math.abs(a.after - a.before))
+    .slice(0, 6);
+}
+
+// ─── Genre Intelligence Schema ────────────────────────────────────────────────
+
+const genreAnalysisSchema = {
+  type: "OBJECT",
+  properties: {
+    detectedGenre: { type: "STRING", description: "One of: hip-hop, pop, electronic, acoustic, custom" },
+    confidence: { type: "STRING", description: "One of: high, medium, low" },
+    genreReasoning: { type: "STRING", description: "Brief explanation of genre detection based on spectral characteristics" },
+    suggestedLUFSTarget: { type: "NUMBER", description: "Recommended LUFS target for this genre (-7 to -14)" },
+  }
+};
 
 /**
  * Deep merge settings, preserving all fields from target and applying overrides from source.
